@@ -4,105 +4,12 @@ import { waitUntil } from '@vercel/functions';
 import crypto from 'node:crypto';
 import { assertPublicUrl } from '../lib/security.js';
 
-const viewports = [
-  { key: 'desktop', width: 1440, height: 1100 },
-  { key: 'tablet', width: 768, height: 1024 },
-  { key: 'mobile', width: 390, height: 844 },
-];
-
-function bearer(req) {
-  return (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-}
-
-function validCallback(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'https:') return false;
-    const cleanPath = u.pathname.replace(/\/+$/, '');
-    if (cleanPath.endsWith('/wp-json/copywp/v1/callback')) return true;
-    const restRoute = (u.searchParams.get('rest_route') || '').replace(/\/+$/, '');
-    return restRoute === '/copywp/v1/callback';
-  } catch {
-    return false;
-  }
-}
-
-async function callback(url, body) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${process.env.COPYWP_TOKEN || ''}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`Callback HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
-}
-
-async function inspect(page) {
-  return page.evaluate(() => {
-    const qs = (s) => Array.from(document.querySelectorAll(s));
-    const visible = (el) => {
-      const r = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      return r.width > 0 && r.height > 0 && cs.display !== 'none' && cs.visibility !== 'hidden';
-    };
-    const nodes = qs('body *').filter(visible).slice(0, 2500);
-    const colors = new Map(), fonts = new Map(), radii = new Map(), shadows = new Map();
-    const add = (m, v) => { if (v && v !== 'none' && v !== 'normal' && v !== 'rgba(0, 0, 0, 0)') m.set(v, (m.get(v) || 0) + 1); };
-    for (const el of nodes) {
-      const s = getComputedStyle(el);
-      add(colors, s.color); add(colors, s.backgroundColor); add(fonts, s.fontFamily); add(radii, s.borderRadius); add(shadows, s.boxShadow);
-    }
-    const top = (m, n=12) => [...m.entries()].sort((a,b)=>b[1]-a[1]).slice(0,n).map(([value,count])=>({value,count}));
-    const sections = qs('header,main > section,main > div,section,footer').filter(visible).slice(0,60).map((el,i)=>({
-      index:i, tag:el.tagName.toLowerCase(), id:el.id || '', classes:(el.className && typeof el.className === 'string') ? el.className.split(/\s+/).slice(0,8) : [],
-      text:(el.innerText || '').trim().replace(/\s+/g,' ').slice(0,300), rect:{width:Math.round(el.getBoundingClientRect().width),height:Math.round(el.getBoundingClientRect().height)}
-    }));
-    return {
-      title: document.title, lang: document.documentElement.lang || '', description: document.querySelector('meta[name="description"]')?.content || '',
-      links: qs('a[href]').slice(0,300).map(a=>({text:(a.innerText||'').trim().slice(0,120),href:a.href})),
-      images: qs('img').slice(0,200).map(img=>({src:img.currentSrc||img.src,alt:img.alt||'',width:img.naturalWidth,height:img.naturalHeight})),
-      tokens:{colors:top(colors),fonts:top(fonts,8),radii:top(radii,8),shadows:top(shadows,8)}, sections
-    };
-  });
-}
-
-async function runScan({ target, scanId, callbackUrl, jobId }) {
-  let browser;
-  try {
-    await callback(callbackUrl,{scanId,status:'processing',progress:15,result:{jobId,stage:'analysis'}});
-    browser = await chromium.launch({args:chromiumPkg.args,executablePath:await chromiumPkg.executablePath(),headless:true});
-    const captures = {};
-    let analysis = null;
-    for (let i=0;i<viewports.length;i++) {
-      const vp=viewports[i];
-      const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},userAgent:'CopyWP Scanner/0.2.3'});
-      const page=await context.newPage();
-      await page.goto(target,{waitUntil:'domcontentloaded',timeout:45000});
-      await page.waitForTimeout(1200);
-      if (!analysis) analysis=await inspect(page);
-      const shot=await page.screenshot({fullPage:true,type:'jpeg',quality:72});
-      captures[vp.key]={width:vp.width,height:vp.height,bytes:shot.length,sha256:crypto.createHash('sha256').update(shot).digest('hex')};
-      await context.close();
-      await callback(callbackUrl,{scanId,status:'processing',progress:30+(i*15),result:{jobId,stage:'captures',captures}});
-    }
-    await callback(callbackUrl,{scanId,status:'processing',progress:85,result:{jobId,stage:'extraction',analysis,captures}});
-    await callback(callbackUrl,{scanId,status:'complete',progress:100,result:{jobId,source:target,analysis,captures,completedAt:new Date().toISOString()}});
-  } catch (e) {
-    console.error('scan failed', jobId, e);
-    try { await callback(callbackUrl,{scanId,status:'error',progress:100,error:e.message,result:{jobId}}); } catch (cb) { console.error('error callback failed', cb); }
-  } finally { if (browser) await browser.close().catch(()=>{}); }
-}
-
-export default async function handler(req,res){
-  if(req.method!=='POST')return res.status(405).json({error:'Method not allowed'});
-  const expected=process.env.COPYWP_TOKEN||'';
-  if(!expected||bearer(req)!==expected)return res.status(401).json({error:'Unauthorized'});
-  const {url,scanId,callbackUrl}=req.body||{};
-  try{await assertPublicUrl(url);}catch(e){return res.status(400).json({error:e.message});}
-  if(!scanId||!validCallback(callbackUrl))return res.status(400).json({error:'Invalid callback'});
-  const jobId=crypto.randomUUID();
-  waitUntil(runScan({target:url,scanId,callbackUrl,jobId}));
-  return res.status(202).json({jobId,status:'queued',progress:10,version:'0.2.3'});
-}
+const viewports=[{key:'desktop',width:1440,height:1100},{key:'tablet',width:768,height:1024},{key:'mobile',width:390,height:844}];
+function bearer(req){return(req.headers.authorization||'').replace(/^Bearer\s+/i,'');}
+function validCallback(raw){try{const u=new URL(raw);if(u.protocol!=='https:')return false;const p=u.pathname.replace(/\/+$/,'');if(p.endsWith('/wp-json/copywp/v1/callback'))return true;return(u.searchParams.get('rest_route')||'').replace(/\/+$/,'')==='/copywp/v1/callback';}catch{return false;}}
+function fallbackCallbackUrl(raw){try{const u=new URL(raw);if(u.pathname.replace(/\/+$/,'').endsWith('/wp-json/copywp/v1/callback')){const f=new URL('/',u.origin);f.searchParams.set('rest_route','/copywp/v1/callback');return f.toString();}}catch{}return null;}
+function signedPayload(body){const payload=JSON.stringify(body);const secret=process.env.COPYWP_TOKEN||'';const signature=crypto.createHmac('sha256',secret).update(payload).digest('hex');return{payload,signature};}
+async function callback(url,body){const{payload,signature}=signedPayload(body);const send=(target)=>fetch(target,{method:'POST',headers:{'content-type':'application/json','authorization':`Bearer ${process.env.COPYWP_TOKEN||''}`,'x-copywp-signature':`sha256=${signature}`},body:payload});let r=await send(url);if(r.status===404){const fb=fallbackCallbackUrl(url);if(fb)r=await send(fb);}if(!r.ok)throw new Error(`Callback HTTP ${r.status}: ${(await r.text()).slice(0,300)}`);}
+async function inspect(page){return page.evaluate(()=>{const qs=s=>Array.from(document.querySelectorAll(s));const visible=el=>{const r=el.getBoundingClientRect(),cs=getComputedStyle(el);return r.width>0&&r.height>0&&cs.display!=='none'&&cs.visibility!=='hidden';};const nodes=qs('body *').filter(visible).slice(0,2500);const colors=new Map(),fonts=new Map(),radii=new Map(),shadows=new Map();const add=(m,v)=>{if(v&&v!=='none'&&v!=='normal'&&v!=='rgba(0, 0, 0, 0)')m.set(v,(m.get(v)||0)+1);};for(const el of nodes){const s=getComputedStyle(el);add(colors,s.color);add(colors,s.backgroundColor);add(fonts,s.fontFamily);add(radii,s.borderRadius);add(shadows,s.boxShadow);}const top=(m,n=12)=>[...m.entries()].sort((a,b)=>b[1]-a[1]).slice(0,n).map(([value,count])=>({value,count}));const sections=qs('header,main > section,main > div,section,footer').filter(visible).slice(0,60).map((el,i)=>({index:i,tag:el.tagName.toLowerCase(),id:el.id||'',classes:(el.className&&typeof el.className==='string')?el.className.split(/\s+/).slice(0,8):[],text:(el.innerText||'').trim().replace(/\s+/g,' ').slice(0,300),rect:{width:Math.round(el.getBoundingClientRect().width),height:Math.round(el.getBoundingClientRect().height)}}));return{title:document.title,lang:document.documentElement.lang||'',description:document.querySelector('meta[name="description"]')?.content||'',links:qs('a[href]').slice(0,300).map(a=>({text:(a.innerText||'').trim().slice(0,120),href:a.href})),images:qs('img').slice(0,200).map(img=>({src:img.currentSrc||img.src,alt:img.alt||'',width:img.naturalWidth,height:img.naturalHeight})),tokens:{colors:top(colors),fonts:top(fonts,8),radii:top(radii,8),shadows:top(shadows,8)},sections};});}
+async function runScan({target,scanId,callbackUrl,jobId}){let browser;try{await callback(callbackUrl,{scanId,status:'processing',progress:15,result:{jobId,stage:'analysis'}});browser=await chromium.launch({args:chromiumPkg.args,executablePath:await chromiumPkg.executablePath(),headless:true});const captures={};let analysis=null;for(let i=0;i<viewports.length;i++){const vp=viewports[i];const context=await browser.newContext({viewport:{width:vp.width,height:vp.height},userAgent:'CopyWP Scanner/0.2.4'});const page=await context.newPage();await page.goto(target,{waitUntil:'domcontentloaded',timeout:45000});await page.waitForTimeout(1200);if(!analysis)analysis=await inspect(page);const shot=await page.screenshot({fullPage:true,type:'jpeg',quality:72});captures[vp.key]={width:vp.width,height:vp.height,bytes:shot.length,sha256:crypto.createHash('sha256').update(shot).digest('hex')};await context.close();await callback(callbackUrl,{scanId,status:'processing',progress:30+(i*15),result:{jobId,stage:'captures',captures}});}await callback(callbackUrl,{scanId,status:'processing',progress:85,result:{jobId,stage:'extraction',analysis,captures}});await callback(callbackUrl,{scanId,status:'complete',progress:100,result:{jobId,source:target,analysis,captures,completedAt:new Date().toISOString()}});}catch(e){console.error('scan failed',jobId,e);try{await callback(callbackUrl,{scanId,status:'error',progress:100,error:e.message,result:{jobId}});}catch(cb){console.error('error callback failed',cb);}}finally{if(browser)await browser.close().catch(()=>{});}}
+export default async function handler(req,res){if(req.method!=='POST')return res.status(405).json({error:'Method not allowed'});const expected=process.env.COPYWP_TOKEN||'';if(!expected||bearer(req)!==expected)return res.status(401).json({error:'Unauthorized'});const{url,scanId,callbackUrl}=req.body||{};try{await assertPublicUrl(url);}catch(e){return res.status(400).json({error:e.message});}if(!scanId||!validCallback(callbackUrl))return res.status(400).json({error:'Invalid callback'});const jobId=crypto.randomUUID();waitUntil(runScan({target:url,scanId,callbackUrl,jobId}));return res.status(202).json({jobId,status:'queued',progress:10,version:'0.2.4'});}
