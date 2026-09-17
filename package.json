@@ -1,16 +1,9 @@
 {
   "name": "copywp-scanner",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "express": "5.1.0",
-    "playwright": "1.55.0"
-  },
-  "engines": {
-    "node": ">=20"
-  }
+  "scripts": {"start": "node server.js"},
+  "dependencies": {"express": "5.1.0", "playwright": "1.55.0"},
+  "engines": {"node": ">=20"}
 }
